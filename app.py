@@ -60,7 +60,7 @@ Context:
 with st.sidebar:
     st.markdown("## 🧠 DocMind AI")
     st.markdown("---")
-    groq_key = st.text_input("🔑 Groq API Key", type="password", placeholder="gsk_...", help="Free at console.groq.com")
+    groq_key = st.secrets.get("GROQ_API_KEY", "") or st.text_input("🔑 Groq API Key", type="password", placeholder="gsk_... (only needed if not pre-configured)", help="Free at console.groq.com")
     st.markdown("---")
     st.markdown("### 📤 Upload Document")
     uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
