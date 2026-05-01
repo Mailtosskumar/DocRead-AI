@@ -5,10 +5,10 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 import tempfile
 
 load_dotenv()
@@ -193,8 +193,7 @@ with st.sidebar:
 
                     # Embed & store
                     embeddings = HuggingFaceEmbeddings(
-                        model_name="all-MiniLM-L6-v2",
-                        model_kwargs={"device": "cpu"}
+                        model_name="all-MiniLM-L6-v2"
                     )
                     vectordb = Chroma.from_documents(chunks, embeddings)
 
