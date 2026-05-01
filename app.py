@@ -8,8 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
-from langchain.chains.retrieval_qa.base import RetrievalQA
+from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
 
@@ -37,10 +36,27 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-for k, v in {"qa_chain": None, "doc_stats": {}, "chat_history": [], "processed": False}.items():
+for k, v in {"retriever": None, "llm": None, "doc_stats": {}, "chat_history": [], "processed": False}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+def answer_question(question, retriever, llm):
+    """RAG pipeline: retrieve relevant chunks then generate answer."""
+    docs = retriever.invoke(question)
+    context = "\n\n".join([d.page_content for d in docs])
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an expert document analyst. Use ONLY the context below to answer the question accurately and concisely.
+If the answer is not in the context, say "I couldn't find that in the document."
+
+Context:
+{context}"""),
+        ("human", "{question}")
+    ])
+    chain = prompt | llm
+    response = chain.invoke({"context": context, "question": question})
+    return response.content, docs
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🧠 DocMind AI")
     st.markdown("---")
@@ -63,23 +79,9 @@ with st.sidebar:
                     chunks = splitter.split_documents(pages)
                     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
                     vectordb = Chroma.from_documents(chunks, embeddings)
-                    llm = ChatGroq(groq_api_key=groq_key, model_name="llama3-8b-8192", temperature=0.2)
 
-                    prompt_template = """You are an expert document analyst. Use the context below to answer the question accurately and concisely. If the answer is not in the context, say "I couldn't find that in the document."
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:"""
-                    PROMPT = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-                    st.session_state.qa_chain = RetrievalQA.from_chain_type(
-                        llm=llm, chain_type="stuff",
-                        retriever=vectordb.as_retriever(search_kwargs={"k": 4}),
-                        return_source_documents=True,
-                        chain_type_kwargs={"prompt": PROMPT}
-                    )
+                    st.session_state.retriever = vectordb.as_retriever(search_kwargs={"k": 4})
+                    st.session_state.llm = ChatGroq(groq_api_key=groq_key, model_name="llama3-8b-8192", temperature=0.2)
                     st.session_state.doc_stats = {"pages": len(pages), "chunks": len(chunks), "filename": uploaded_file.name}
                     st.session_state.processed = True
                     st.session_state.chat_history = []
@@ -94,9 +96,10 @@ Answer:"""
         st.markdown(f'<span class="tech-pill">{tech}</span>', unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("### How it works")
-    for n, step in enumerate(["PDF split into chunks","Chunks converted to embeddings","Stored in ChromaDB vector store","Query matched via semantic search","Llama 3 generates grounded answer"], 1):
+    for n, step in enumerate(["PDF split into chunks","Chunks → vector embeddings","Stored in ChromaDB","Query matched semantically","Llama 3 generates answer"], 1):
         st.markdown(f"**{n}.** {step}")
 
+# ── Hero ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
     <div class="badge">⚡ POWERED BY RAG + LANGCHAIN + LLAMA 3</div>
@@ -135,8 +138,8 @@ if st.session_state.processed:
         ask = st.button("Ask →")
 
     st.markdown("**Try these:**")
-    sample_qs = ["Summarise this document", "What are the key points?", "What conclusions are drawn?"]
     cols = st.columns(3)
+    sample_qs = ["Summarise this document", "What are the key points?", "What conclusions are drawn?"]
     for i, sq in enumerate(sample_qs):
         with cols[i]:
             if st.button(sq, key=f"sq_{i}"):
@@ -146,9 +149,7 @@ if st.session_state.processed:
     if ask and question:
         with st.spinner("🔍 Searching document & generating answer..."):
             try:
-                result = st.session_state.qa_chain({"query": question})
-                answer = result["result"]
-                sources = result.get("source_documents", [])
+                answer, sources = answer_question(question, st.session_state.retriever, st.session_state.llm)
                 st.session_state.chat_history.append({"q": question, "a": answer, "sources": sources})
                 st.rerun()
             except Exception as e:
