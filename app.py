@@ -81,7 +81,7 @@ with st.sidebar:
                     vectordb = Chroma.from_documents(chunks, embeddings)
 
                     st.session_state.retriever = vectordb.as_retriever(search_kwargs={"k": 4})
-                    st.session_state.llm = ChatGroq(groq_api_key=groq_key, model_name="llama3-8b-8192", temperature=0.2)
+                    st.session_state.llm = ChatGroq(groq_api_key=groq_key, model_name="llama-3.3-70b-versatile", temperature=0.2)
                     st.session_state.doc_stats = {"pages": len(pages), "chunks": len(chunks), "filename": uploaded_file.name}
                     st.session_state.processed = True
                     st.session_state.chat_history = []
