@@ -2,13 +2,16 @@ import streamlit as st
 import os
 import tempfile
 from dotenv import load_dotenv
+import requests
+from io import StringIO
 
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, CSVLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.documents import Document
 
 load_dotenv()
 
@@ -31,6 +34,7 @@ st.markdown("""
     .stat-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.9rem; text-align: center; }
     .stat-num { font-size: 1.5rem; font-weight: 700; color: #2563eb; }
     .stat-lbl { font-size: 0.75rem; color: #64748b; margin-top: 2px; }
+    .filetype-pill { display: inline-block; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; border-radius: 20px; padding: 3px 10px; font-size: 0.73rem; font-weight: 600; margin: 2px; }
     .stButton > button { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; border: none; border-radius: 8px; padding: 0.55rem 1.4rem; font-weight: 600; font-size: 0.95rem; width: 100%; }
     footer { visibility: hidden; }
 </style>
@@ -40,8 +44,54 @@ for k, v in {"retriever": None, "llm": None, "doc_stats": {}, "chat_history": []
     if k not in st.session_state:
         st.session_state[k] = v
 
+def load_documents(uploaded_file=None, url=None):
+    """Load documents from various file types or URL."""
+    docs = []
+    source_name = ""
+
+    if url:
+        try:
+            from langchain_community.document_loaders import WebBaseLoader
+            loader = WebBaseLoader(url)
+            docs = loader.load()
+            source_name = url
+        except Exception as e:
+            raise Exception(f"Could not load URL: {e}")
+
+    elif uploaded_file:
+        suffix = "." + uploaded_file.name.split(".")[-1].lower()
+        source_name = uploaded_file.name
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded_file.read())
+            tmp_path = tmp.name
+
+        try:
+            if suffix == ".pdf":
+                loader = PyPDFLoader(tmp_path)
+                docs = loader.load()
+            elif suffix == ".txt":
+                loader = TextLoader(tmp_path, encoding="utf-8")
+                docs = loader.load()
+            elif suffix == ".docx":
+                loader = Docx2txtLoader(tmp_path)
+                docs = loader.load()
+            elif suffix == ".csv":
+                loader = CSVLoader(tmp_path)
+                docs = loader.load()
+            elif suffix in [".xlsx", ".xls"]:
+                import pandas as pd
+                df = pd.read_excel(tmp_path)
+                text = df.to_string(index=False)
+                docs = [Document(page_content=text, metadata={"source": source_name})]
+            else:
+                raise Exception(f"Unsupported file type: {suffix}")
+        finally:
+            os.unlink(tmp_path)
+
+    return docs, source_name
+
 def answer_question(question, retriever, llm):
-    """RAG pipeline: retrieve relevant chunks then generate answer."""
     docs = retriever.invoke(question)
     context = "\n\n".join([d.page_content for d in docs])
     prompt = ChatPromptTemplate.from_messages([
@@ -60,58 +110,92 @@ Context:
 with st.sidebar:
     st.markdown("## 🧠 DocMind AI")
     st.markdown("---")
-    groq_key = st.secrets.get("GROQ_API_KEY", "") or st.text_input("🔑 Groq API Key", type="password", placeholder="gsk_... (only needed if not pre-configured)", help="Free at console.groq.com")
-    st.markdown("---")
-    st.markdown("### 📤 Upload Document")
-    uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
 
-    if uploaded_file and groq_key:
+    groq_key = st.secrets.get("GROQ_API_KEY", "") or st.text_input(
+        "🔑 Groq API Key", type="password", placeholder="gsk_...", help="Free at console.groq.com"
+    )
+
+    st.markdown("---")
+    st.markdown("### 📤 Upload Document or URL")
+
+    # File types supported
+    st.markdown("**Supported formats:**")
+    for ft in ["PDF", "DOCX", "TXT", "CSV", "XLSX", "Web URL"]:
+        st.markdown(f'<span class="filetype-pill">{ft}</span>', unsafe_allow_html=True)
+
+    st.markdown("")
+    input_mode = st.radio("Input type:", ["📄 Upload File", "🌐 Web URL"], horizontal=True)
+
+    uploaded_file = None
+    url_input = None
+
+    if input_mode == "📄 Upload File":
+        uploaded_file = st.file_uploader(
+            "Choose a file",
+            type=["pdf", "txt", "docx", "csv", "xlsx", "xls"]
+        )
+    else:
+        url_input = st.text_input("Paste a URL", placeholder="https://example.com/article")
+
+    has_input = (uploaded_file is not None) or (url_input and url_input.startswith("http"))
+
+    if has_input and groq_key:
         if st.button("⚡ Process Document"):
             with st.spinner("Reading & indexing your document..."):
                 try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(uploaded_file.read())
-                        tmp_path = tmp.name
+                    docs, source_name = load_documents(
+                        uploaded_file=uploaded_file,
+                        url=url_input if input_mode == "🌐 Web URL" else None
+                    )
 
-                    loader = PyPDFLoader(tmp_path)
-                    pages = loader.load()
-                    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
-                    chunks = splitter.split_documents(pages)
-                    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-                    vectordb = Chroma.from_documents(chunks, embeddings)
+                    if not docs:
+                        st.error("No content could be extracted. Please try a different file.")
+                    else:
+                        splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+                        chunks = splitter.split_documents(docs)
+                        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                        vectordb = Chroma.from_documents(chunks, embeddings)
 
-                    st.session_state.retriever = vectordb.as_retriever(search_kwargs={"k": 4})
-                    st.session_state.llm = ChatGroq(groq_api_key=groq_key, model_name="llama-3.3-70b-versatile", temperature=0.2)
-                    st.session_state.doc_stats = {"pages": len(pages), "chunks": len(chunks), "filename": uploaded_file.name}
-                    st.session_state.processed = True
-                    st.session_state.chat_history = []
-                    os.unlink(tmp_path)
-                    st.success("✅ Document ready!")
+                        st.session_state.retriever = vectordb.as_retriever(search_kwargs={"k": 4})
+                        st.session_state.llm = ChatGroq(
+                            groq_api_key=groq_key,
+                            model_name="llama-3.3-70b-versatile",
+                            temperature=0.2
+                        )
+                        st.session_state.doc_stats = {
+                            "pages": len(docs),
+                            "chunks": len(chunks),
+                            "filename": source_name
+                        }
+                        st.session_state.processed = True
+                        st.session_state.chat_history = []
+                        st.success("✅ Document ready!")
+
                 except Exception as e:
                     st.error(f"Error: {e}")
 
     st.markdown("---")
     st.markdown("### 🛠 Tech Stack")
-    for tech in ["LangChain", "Groq (Llama 3)", "ChromaDB", "HuggingFace Embeddings", "Streamlit"]:
+    for tech in ["LangChain", "Groq (Llama 3)", "ChromaDB", "HuggingFace", "Streamlit"]:
         st.markdown(f'<span class="tech-pill">{tech}</span>', unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("### How it works")
-    for n, step in enumerate(["PDF split into chunks","Chunks → vector embeddings","Stored in ChromaDB","Query matched semantically","Llama 3 generates answer"], 1):
+    for n, step in enumerate(["Document split into chunks","Chunks → vector embeddings","Stored in ChromaDB","Query matched semantically","Llama 3 generates answer"], 1):
         st.markdown(f"**{n}.** {step}")
 
 # ── Hero ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-    <div class="badge">⚡ POWERED BY RAG + LANGCHAIN + LLAMA 3</div>
+    <div class="badge">⚡ PDF • DOCX • TXT • CSV • XLSX • WEB URL</div>
     <h1>🧠 DocMind AI</h1>
-    <p>Upload any PDF and have an intelligent conversation with your document.<br>Grounded answers, real sources — no hallucinations.</p>
+    <p>Upload any document or paste a URL and have an intelligent conversation with it.<br>Grounded answers, real sources — no hallucinations.</p>
 </div>
 """, unsafe_allow_html=True)
 
 if st.session_state.processed:
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown(f'<div class="stat-box"><div class="stat-num">{st.session_state.doc_stats["pages"]}</div><div class="stat-lbl">Pages Indexed</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-box"><div class="stat-num">{st.session_state.doc_stats["pages"]}</div><div class="stat-lbl">Sections Loaded</div></div>', unsafe_allow_html=True)
     with c2:
         st.markdown(f'<div class="stat-box"><div class="stat-num">{st.session_state.doc_stats["chunks"]}</div><div class="stat-lbl">Text Chunks</div></div>', unsafe_allow_html=True)
     with c3:
@@ -125,15 +209,16 @@ if st.session_state.chat_history:
         if item.get("sources"):
             with st.expander("📎 View Sources"):
                 for src in item["sources"]:
-                    pg = src.metadata.get("page", "?")
-                    st.markdown(f'<span class="source-chip">Page {int(pg)+1}</span>', unsafe_allow_html=True)
+                    pg = src.metadata.get("page", src.metadata.get("row", "—"))
+                    label = f"Page {int(pg)+1}" if isinstance(pg, (int, float)) else "Source"
+                    st.markdown(f'<span class="source-chip">{label}</span>', unsafe_allow_html=True)
                     st.markdown(f'<div class="source-text">{src.page_content[:300]}...</div>', unsafe_allow_html=True)
 
 if st.session_state.processed:
     st.markdown("### 🔍 Ask a Question")
     col1, col2 = st.columns([5, 1])
     with col1:
-        question = st.text_input("", placeholder="e.g. What are the key findings? Summarise section 3...", label_visibility="collapsed")
+        question = st.text_input("", placeholder="e.g. Summarise this document / What are the key figures?", label_visibility="collapsed")
     with col2:
         ask = st.button("Ask →")
 
@@ -147,7 +232,7 @@ if st.session_state.processed:
                 ask = True
 
     if ask and question:
-        with st.spinner("🔍 Searching document & generating answer..."):
+        with st.spinner("🔍 Searching & generating answer..."):
             try:
                 answer, sources = answer_question(question, st.session_state.retriever, st.session_state.llm)
                 st.session_state.chat_history.append({"q": question, "a": answer, "sources": sources})
@@ -162,9 +247,9 @@ if st.session_state.processed:
 else:
     st.markdown("""
     <div class="card" style="text-align:center;padding:3rem;">
-        <div style="font-size:3rem;margin-bottom:1rem">📄</div>
+        <div style="font-size:3rem;margin-bottom:1rem">📂</div>
         <h3 style="color:#1e293b;margin-bottom:0.5rem">No document loaded yet</h3>
-        <p style="color:#64748b">Enter your Groq API key and upload a PDF in the sidebar to get started.</p>
+        <p style="color:#64748b">Upload a PDF, Word, Excel, CSV, TXT file — or paste any web URL — to get started.</p>
         <div style="margin-top:1.2rem">
             <a href="https://console.groq.com" target="_blank" style="background:#2563eb;color:white;padding:0.5rem 1.2rem;border-radius:8px;text-decoration:none;font-weight:600;font-size:0.9rem">Get Free Groq API Key →</a>
         </div>
@@ -173,8 +258,8 @@ else:
     st.markdown("### 💡 What can you do with DocMind AI?")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown('<div class="card"><h4>📊 Research Reports</h4><p style="color:#64748b;font-size:0.9rem">Ask questions about any research paper, get grounded answers with page references.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4>📊 Excel & CSV Data</h4><p style="color:#64748b;font-size:0.9rem">Ask questions about spreadsheet data, sales reports, and financial tables.</p></div>', unsafe_allow_html=True)
     with col2:
-        st.markdown('<div class="card"><h4>📋 Legal Documents</h4><p style="color:#64748b;font-size:0.9rem">Understand contracts, extract clauses, and get plain-language explanations.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4>📋 Word & PDF Docs</h4><p style="color:#64748b;font-size:0.9rem">Understand contracts, reports, and manuals with plain-language answers.</p></div>', unsafe_allow_html=True)
     with col3:
-        st.markdown('<div class="card"><h4>📈 Annual Reports</h4><p style="color:#64748b;font-size:0.9rem">Analyse financial statements, identify key metrics and business highlights.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4>🌐 Any Web Page</h4><p style="color:#64748b;font-size:0.9rem">Paste any URL — news articles, blog posts, documentation — and chat with it.</p></div>', unsafe_allow_html=True)
