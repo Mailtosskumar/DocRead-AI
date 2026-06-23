@@ -10,3 +10,8 @@ sentence-transformers
 pypdf
 python-dotenv
 protobuf==3.20.3
+docx2txt
+pandas
+openpyxl
+beautifulsoup4
+requests
