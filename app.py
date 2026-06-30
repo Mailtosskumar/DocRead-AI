@@ -196,7 +196,7 @@ with st.sidebar:
                         st.session_state.retriever = vectordb.as_retriever(search_kwargs={"k": 4})
                         st.session_state.llm = ChatGroq(
                             groq_api_key=groq_key,
-                            model_name="llama-3.3-70b-versatile",
+                            model_name="openai/gpt-oss-120b",
                             temperature=0.2
                         )
                         st.session_state.doc_stats = {
@@ -214,7 +214,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🛠 Tech Stack")
-    for tech in ["LangChain", "Groq (Llama 3)", "ChromaDB", "HuggingFace", "Tesseract OCR", "Streamlit"]:
+    for tech in ["LangChain", "Groq (GPT-OSS 120B)", "ChromaDB", "HuggingFace", "Tesseract OCR", "Streamlit"]:
         st.markdown(f'<span class="tech-pill">{tech}</span>', unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("### How it works")
@@ -224,7 +224,7 @@ with st.sidebar:
         "Chunks → vector embeddings",
         "Stored in ChromaDB",
         "Query matched semantically",
-        "Llama 3 generates answer"
+        "GPT-OSS generates answer"
     ], 1):
         st.markdown(f"**{n}.** {step}")
 
